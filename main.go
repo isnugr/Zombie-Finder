@@ -46,7 +46,6 @@ type ScanResult struct {
 var (
 	detectTasks  []map[string]interface{}
 	measureTasks []map[string]interface{}
-	results      []ScanResult
 	vectors      = []Vector{
 		{
 			Name:    "DNS_A",
@@ -90,22 +89,6 @@ func getVector(vectorName string) (Vector, bool) {
 	return Vector{}, false
 }
 
-func addDetectTask(host, vectorName string) {
-	vector, found := getVector(vectorName)
-	if !found {
-		return
-	}
-
-	task := map[string]interface{}{
-		"host":    host,
-		"name":    vector.Name,
-		"port":    vector.Port,
-		"payload": vector.Payload,
-	}
-
-	detectTasks = append(detectTasks, task)
-}
-
 func addMeasureTask(host, vectorName string) {
 	vector, found := getVector(vectorName)
 	if !found {
@@ -121,12 +104,6 @@ func addMeasureTask(host, vectorName string) {
 
 	mutex.Lock()
 	measureTasks = append(measureTasks, task)
-	mutex.Unlock()
-}
-
-func addResult(result ScanResult) {
-	mutex.Lock()
-	results = append(results, result)
 	mutex.Unlock()
 }
 
@@ -167,7 +144,7 @@ func scanHost(task map[string]interface{}, timeout time.Duration, db *sql.DB) bo
 	return true
 }
 
-func measureHost(task map[string]interface{}, timeout time.Duration) {
+func measureHost(task map[string]interface{}, timeout time.Duration, db *sql.DB) {
 	host := task["host"].(string)
 	port := task["port"].(int)
 	vectorName := task["name"].(string)
@@ -249,7 +226,8 @@ func measureHost(task map[string]interface{}, timeout time.Duration) {
 		Latency:   latency,
 	}
 
-	addResult(result)
+	// Insert langsung ke DB, ignore error jika gagal
+	_ = insertResult(db, result)
 }
 
 func displayVectors() {
@@ -447,31 +425,51 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Tambahkan tasks deteksi berdasarkan fetchAndMarkNextPendingHost
-	for {
-		ip, err := fetchAndMarkNextPendingHost(db)
-		if err != nil {
-			break // tidak ada lagi pending
-		}
-		for _, vector := range vectors {
-			addDetectTask(ip, vector.Name)
-		}
-	}
-
-	// Detection phase dengan progress bar
-	barDetect := progressbar.NewOptions(len(detectTasks),
+	// Detection phase with worker pool
+	var wgDetect sync.WaitGroup
+	// Get total hosts for progress bar
+	var totalHosts int
+	row := db.QueryRow("SELECT COUNT(*) FROM hosts")
+	row.Scan(&totalHosts)
+	barDetect := progressbar.NewOptions(totalHosts,
 		progressbar.OptionSetDescription("Detection"),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(20),
-		progressbar.OptionClearOnFinish(),
 	)
-	for i := 0; i < len(detectTasks); i++ {
-		task := detectTasks[i]
-		scanHost(task, timeout, db)
-		barDetect.Add(1)
+	workerDetectCount := runtime.NumCPU()
+	ctxDetect, cancelDetect := context.WithCancel(context.Background())
+	defer cancelDetect()
+	detectWorker := func() {
+		defer wgDetect.Done()
+		for {
+			select {
+			case <-ctxDetect.Done():
+				return
+			default:
+				ip, err := fetchAndMarkNextPendingHost(db)
+				if err != nil {
+					return // no more pending
+				}
+				for _, vector := range vectors {
+					task := map[string]interface{}{
+						"host":    ip,
+						"name":    vector.Name,
+						"port":    vector.Port,
+						"payload": vector.Payload,
+					}
+					if scanHost(task, timeout, db) {
+						addMeasureTask(ip, vector.Name)
+					}
+				}
+				barDetect.Add(1)
+			}
+		}
 	}
-
-	fmt.Printf("\nFound %d open UDP applications\n", len(measureTasks))
+	for i := 0; i < workerDetectCount; i++ {
+		wgDetect.Add(1)
+		go detectWorker()
+	}
+	wgDetect.Wait()
 
 	// Measurement phase dengan progress bar
 	iterations := len(measureTasks)
@@ -482,8 +480,8 @@ func main() {
 		progressbar.OptionClearOnFinish(),
 	)
 	var wg sync.WaitGroup
-	minWorkers := 2
-	maxWorkers := runtime.NumCPU() * 4
+	minWorkers := 8
+	maxWorkers := runtime.NumCPU() * 8
 	workerCount := runtime.NumCPU()
 	measureTaskChan := make(chan map[string]interface{}, iterations)
 	for i := 0; i < iterations; i++ {
@@ -504,7 +502,6 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt)
 	go func() {
 		<-sigCh
-		fmt.Println("\n[!] Caught interrupt signal, shutting down gracefully...")
 		cancel()
 	}()
 
@@ -520,7 +517,7 @@ func main() {
 					if !ok {
 						return
 					}
-					measureHost(task, timeout)
+					measureHost(task, timeout, db)
 					updateHostStatus(db, task["host"].(string), "done")
 					barMeasure.Add(1)
 				case <-quit:
@@ -536,11 +533,29 @@ func main() {
 		activeWorkers++
 	}
 
+	fmt.Println("[DEBUG] Mulai measurement phase")
+	wg.Wait()
+	fmt.Println("[DEBUG] Semua measurement worker selesai")
+
+	// Print statistik dari database
+	fmt.Println("\nStatistik hasil scan:")
+	var nDetected, nResults, nHosts int
+	row = db.QueryRow("SELECT COUNT(DISTINCT host) FROM scan_results")
+	row.Scan(&nDetected)
+	row = db.QueryRow("SELECT COUNT(*) FROM scan_results")
+	row.Scan(&nResults)
+	row = db.QueryRow("SELECT COUNT(*) FROM hosts")
+	row.Scan(&nHosts)
+	fmt.Printf("Host terdeteksi open: %d\n", nDetected)
+	fmt.Printf("Total hasil (host+vector open): %d\n", nResults)
+	fmt.Printf("Total host discan: %d\n", nHosts)
+
 	// Goroutine untuk adaptasi worker
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
+				fmt.Println("[DEBUG] Adapt worker goroutine exit: ctx.Done()")
 				return
 			default:
 				time.Sleep(5 * time.Second)
@@ -549,34 +564,16 @@ func main() {
 				if cpuLoad > 90 && activeWorkers > minWorkers {
 					workerQuit[activeWorkers-1] <- struct{}{}
 					activeWorkers--
-					fmt.Printf("\n[ADAPT] CPU load %.1f%%, turunkan worker jadi %d\n", cpuLoad, activeWorkers)
 				} else if cpuLoad < 70 && activeWorkers < maxWorkers {
 					startWorker(activeWorkers)
 					activeWorkers++
-					fmt.Printf("\n[ADAPT] CPU load %.1f%%, naikkan worker jadi %d\n", cpuLoad, activeWorkers)
 				}
 				workerLock.Unlock()
 				if activeWorkers == 0 {
+					fmt.Println("[DEBUG] Adapt worker goroutine exit: activeWorkers == 0")
 					return
 				}
 			}
 		}
 	}()
-
-	wg.Wait()
-
-	// Print results
-	fmt.Println("\n\nHost\tPort\tVector\t\tFailed\tAmp\tLatency")
-	fmt.Println("_______________________________________________________")
-
-	for _, result := range results {
-		fmt.Printf("%s\t%d\t%s\t\t%s\t%sx\t%sms\n",
-			result.Host, result.Port, result.Name, result.HitRate, result.AmpFactor, result.Latency)
-		if !strings.HasPrefix(result.HitRate, "50/") { // hanya simpan yang berhasil
-			err := insertResult(db, result)
-			if err != nil {
-				fmt.Printf("Failed to insert result to DB: %v\n", err)
-			}
-		}
-	}
 }
