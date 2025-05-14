@@ -21,6 +21,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/schollz/progressbar/v3"
 	"github.com/shirou/gopsutil/v3/cpu"
 )
 
@@ -43,7 +44,6 @@ type ScanResult struct {
 
 // Global variables
 var (
-	hosts        []string
 	detectTasks  []map[string]interface{}
 	measureTasks []map[string]interface{}
 	results      []ScanResult
@@ -79,25 +79,6 @@ func average(values []int) float64 {
 		sum += v
 	}
 	return float64(sum) / float64(len(values))
-}
-
-func addHost(host string) {
-	// Check if it's a /24 subnet
-	if strings.HasSuffix(host, "/24") {
-		base := strings.TrimSuffix(host, "/24")
-		parts := strings.Split(base, ".")
-		if len(parts) != 4 {
-			fmt.Println("Invalid IPv4 address format for subnet:", host)
-			return
-		}
-
-		baseIP := strings.Join(parts[:3], ".")
-		for i := 0; i < 256; i++ {
-			hosts = append(hosts, fmt.Sprintf("%s.%d", baseIP, i))
-		}
-	} else {
-		hosts = append(hosts, host)
-	}
 }
 
 func getVector(vectorName string) (Vector, bool) {
@@ -271,12 +252,6 @@ func measureHost(task map[string]interface{}, timeout time.Duration) {
 	addResult(result)
 }
 
-func printProgressBar(current, total int) {
-	backspaces := "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"
-	fmt.Print(backspaces)
-	fmt.Printf("(%d/%d)", current, total)
-}
-
 func displayVectors() {
 	fmt.Println("Name\t\tPort\tPayload Size")
 	fmt.Println("____________________________________")
@@ -417,48 +392,6 @@ func main() {
 
 	timeout := time.Duration(*timeoutPtr) * time.Millisecond
 
-	// Membaca host dari file
-	hostFile, err := os.Open(*hostsFilePtr)
-	if err != nil {
-		fmt.Printf("Failed to open hosts file: %v\n", err)
-		os.Exit(1)
-	}
-	defer hostFile.Close()
-
-	scanner := bufio.NewScanner(hostFile)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		addHost(line)
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Printf("Error reading hosts file: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Adding tasks
-	if *vectorsPtr == "all" {
-		for _, vector := range vectors {
-			for _, host := range hosts {
-				addDetectTask(host, vector.Name)
-			}
-		}
-	} else {
-		vectorList := strings.Split(*vectorsPtr, ",")
-		for _, vectorName := range vectorList {
-			for _, host := range hosts {
-				addDetectTask(host, strings.TrimSpace(vectorName))
-			}
-		}
-	}
-
-	// Start scanning
-	fmt.Printf("Starting amplification-scanner at %s\n", time.Now().Format(time.RFC3339))
-	iterations := len(detectTasks)
-	fmt.Printf("Searching for open UDP applications (0/%d)", iterations)
-
 	// Inisialisasi database
 	db, err := initDB("data.db")
 	if err != nil {
@@ -473,6 +406,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Masukkan IP dari file ke tabel hosts di database
+	if err := insertHostsFromFile(db, *hostsFilePtr); err != nil {
+		fmt.Printf("Failed to insert hosts from file: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Tambahkan tasks deteksi berdasarkan fetchAndMarkNextPendingHost
 	for {
 		ip, err := fetchAndMarkNextPendingHost(db)
@@ -484,21 +423,29 @@ func main() {
 		}
 	}
 
-	// Detection phase
-	for i := 0; i < iterations; i++ {
-		task := detectTasks[len(detectTasks)-1]
-		detectTasks = detectTasks[:len(detectTasks)-1]
-
+	// Detection phase dengan progress bar
+	barDetect := progressbar.NewOptions(len(detectTasks),
+		progressbar.OptionSetDescription("Detection"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(20),
+		progressbar.OptionClearOnFinish(),
+	)
+	for i := 0; i < len(detectTasks); i++ {
+		task := detectTasks[i]
 		scanHost(task, timeout, db)
-		printProgressBar(i+1, iterations)
+		barDetect.Add(1)
 	}
 
 	fmt.Printf("\nFound %d open UDP applications\n", len(measureTasks))
 
-	// Measurement phase adaptif
-	iterations = len(measureTasks)
-	fmt.Printf("Measuring UDP applications (0/%d)", iterations)
-
+	// Measurement phase dengan progress bar
+	iterations := len(measureTasks)
+	barMeasure := progressbar.NewOptions(iterations,
+		progressbar.OptionSetDescription("Measurement"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(20),
+		progressbar.OptionClearOnFinish(),
+	)
 	var wg sync.WaitGroup
 	minWorkers := 2
 	maxWorkers := runtime.NumCPU() * 4
@@ -517,7 +464,6 @@ func main() {
 	activeWorkers := 0
 	workerLock := &sync.Mutex{}
 
-	// Setup context untuk cancellation (Ctrl+C)
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -541,6 +487,7 @@ func main() {
 					}
 					measureHost(task, timeout)
 					updateHostStatus(db, task["host"].(string), "done")
+					barMeasure.Add(1)
 				case <-quit:
 					return
 				}
