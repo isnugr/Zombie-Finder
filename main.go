@@ -319,18 +319,53 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	}
 	defer file.Close()
 
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO hosts (ip) VALUES (?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		ip := strings.TrimSpace(scanner.Text())
 		if ip == "" || strings.HasPrefix(ip, "#") {
 			continue
 		}
-		_, err := db.Exec(`INSERT OR IGNORE INTO hosts (ip) VALUES (?)`, ip)
-		if err != nil {
-			return err
+		if strings.HasSuffix(ip, "/24") {
+			base := strings.TrimSuffix(ip, "/24")
+			parts := strings.Split(base, ".")
+			if len(parts) != 4 {
+				continue
+			}
+			baseIP := strings.Join(parts[:3], ".")
+			for i := 0; i < 256; i++ {
+				fullIP := fmt.Sprintf("%s.%d", baseIP, i)
+				if net.ParseIP(fullIP) == nil {
+					continue
+				}
+				_, err := stmt.Exec(fullIP)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			if net.ParseIP(ip) == nil {
+				continue
+			}
+			_, err := stmt.Exec(ip)
+			if err != nil {
+				return err
+			}
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func updateHostStatus(db *sql.DB, ip, status string) error {
