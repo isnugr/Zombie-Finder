@@ -3,10 +3,11 @@ package main
 import (
 	"bufio"
 	"database/sql"
-	"fmt"
 	"net"
 	"os"
 	"strings"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 func initDB(dsn string) (*sql.DB, error) {
@@ -30,7 +31,12 @@ func initAllTables(db *sql.DB) error {
 
 // Pindahkan CREATE TABLE scan_results ke fungsi baru
 func initDBTables(db *sql.DB) error {
-	createTable := `CREATE TABLE IF NOT EXISTS scan_results (
+	dropTable := `DROP TABLE IF EXISTS scan_results;`
+	_, err := db.Exec(dropTable)
+	if err != nil {
+		return err
+	}
+	createTable := `CREATE TABLE scan_results (
 		id INTEGER PRIMARY KEY AUTO_INCREMENT,
 		host TEXT,
 		port INTEGER,
@@ -39,7 +45,7 @@ func initDBTables(db *sql.DB) error {
 		ampfactor TEXT,
 		latency TEXT
 	);`
-	_, err := db.Exec(createTable)
+	_, err = db.Exec(createTable)
 	return err
 }
 
@@ -51,12 +57,17 @@ func insertResult(db *sql.DB, result ScanResult) error {
 
 // Tambahkan fungsi untuk inisialisasi tabel hosts dan batch insert
 func initHostsTable(db *sql.DB) error {
-	createTable := `CREATE TABLE IF NOT EXISTS hosts (
+	dropTable := `DROP TABLE IF EXISTS hosts;`
+	_, err := db.Exec(dropTable)
+	if err != nil {
+		return err
+	}
+	createTable := `CREATE TABLE hosts (
 		id INTEGER PRIMARY KEY AUTO_INCREMENT,
 		ip TEXT UNIQUE,
 		status TEXT DEFAULT 'pending'
 	);`
-	_, err := db.Exec(createTable)
+	_, err = db.Exec(createTable)
 	return err
 }
 
@@ -119,16 +130,21 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 				count := 1 << (bits - ones)
 				total += count
 			}
+		} else {
+			total++
 		}
 	}
-	fmt.Printf("Akan meng-insert total %d IP dari file %s\n", total, path)
+
+	bar := progressbar.NewOptions(total,
+		progressbar.OptionSetDescription("Insert Hosts"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(20),
+		progressbar.OptionClearOnFinish(),
+	)
 
 	batchSize := 256
 	batchIPs := make([]string, 0, batchSize)
 	inserted := 0
-
-	progress := 0
-	lastPercent := -1
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -158,13 +174,8 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 						return err
 					}
 					inserted += len(batchIPs)
+					bar.Add(len(batchIPs))
 					batchIPs = batchIPs[:0]
-					// Progress bar update
-					progress = int(float64(inserted) / float64(total) * 100)
-					if progress != lastPercent {
-						fmt.Printf("\rProgress: %d%%", progress)
-						lastPercent = progress
-					}
 				}
 			}
 		} else {
@@ -182,13 +193,8 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 					return err
 				}
 				inserted += len(batchIPs)
+				bar.Add(len(batchIPs))
 				batchIPs = batchIPs[:0]
-				// Progress bar update
-				progress = int(float64(inserted) / float64(total) * 100)
-				if progress != lastPercent {
-					fmt.Printf("\rProgress: %d%%", progress)
-					lastPercent = progress
-				}
 			}
 		}
 	}
@@ -206,17 +212,12 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 			return err
 		}
 		inserted += len(batchIPs)
-		// Progress bar update
-		progress = int(float64(inserted) / float64(total) * 100)
-		if progress != lastPercent {
-			fmt.Printf("\rProgress: %d%%", progress)
-			lastPercent = progress
-		}
+		bar.Add(len(batchIPs))
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	fmt.Printf("\rProgress: 100%%\n")
+	bar.Finish()
 	return nil
 }
 

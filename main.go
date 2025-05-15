@@ -231,13 +231,12 @@ func main() {
 	}
 	defer db.Close()
 
-	// Inisialisasi semua tabel
-	if err := initAllTables(db); err != nil {
-		fmt.Printf("Failed to initialize tables: %v\n", err)
-		os.Exit(1)
-	}
-
 	if *hostsFilePtr != "" {
+		// Inisialisasi semua tabel hanya jika ada hostsfile
+		if err := initAllTables(db); err != nil {
+			fmt.Printf("Failed to initialize tables: %v\n", err)
+			os.Exit(1)
+		}
 		if err := insertHostsFromFile(db, *hostsFilePtr); err != nil {
 			fmt.Printf("Failed to insert hosts from file: %v\n", err)
 			os.Exit(1)
