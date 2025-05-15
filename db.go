@@ -130,7 +130,7 @@ func fetchAndMarkNextPendingHost(db *sql.DB) (string, error) {
 	defer tx.Rollback()
 
 	var ip string
-	err = tx.QueryRow(`SELECT ip FROM hosts WHERE status = 'pending' LIMIT 1`).Scan(&ip)
+	err = tx.QueryRow(`SELECT ip FROM hosts WHERE status = 'pending' LIMIT 1 FOR UPDATE`).Scan(&ip)
 	if err != nil {
 		return "", err // no rows = selesai
 	}
