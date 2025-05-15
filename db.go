@@ -3,11 +3,10 @@ package main
 import (
 	"bufio"
 	"database/sql"
+	"fmt"
 	"net"
 	"os"
 	"strings"
-
-	"github.com/schollz/progressbar/v3"
 )
 
 func initDB(dsn string) (*sql.DB, error) {
@@ -103,7 +102,7 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	}
 	defer file.Close()
 
-	// Hitung total IP valid untuk progress bar
+	// Hitung total IP valid untuk logging
 	total := 0
 	scanCount, _ := os.Open(path)
 	defer scanCount.Close()
@@ -122,11 +121,7 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 			}
 		}
 	}
-
-	bar := progressbar.NewOptions(total,
-		progressbar.OptionSetDescription("Insert Hosts"),
-		progressbar.OptionShowCount(),
-	)
+	fmt.Printf("Akan meng-insert total %d IP dari file %s\n", total, path)
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -135,6 +130,7 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 
 	batchSize := 256
 	batchIPs := make([]string, 0, batchSize)
+	inserted := 0
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -153,11 +149,11 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 				batchIPs = append(batchIPs, ipCopy.String())
 				if len(batchIPs) >= batchSize {
 					if err := insertIPBatch(tx, batchIPs); err != nil {
+						fmt.Printf("Gagal insert batch: %v\n", err)
 						return err
 					}
-					for range batchIPs {
-						bar.Add(1)
-					}
+					inserted += len(batchIPs)
+					fmt.Printf("Batch insert %d IP, total inserted: %d\n", len(batchIPs), inserted)
 					batchIPs = batchIPs[:0]
 				}
 			}
@@ -166,15 +162,16 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	// Insert sisa batch
 	if len(batchIPs) > 0 {
 		if err := insertIPBatch(tx, batchIPs); err != nil {
+			fmt.Printf("Gagal insert batch: %v\n", err)
 			return err
 		}
-		for range batchIPs {
-			bar.Add(1)
-		}
+		inserted += len(batchIPs)
+		fmt.Printf("Batch insert %d IP, total inserted: %d\n", len(batchIPs), inserted)
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	fmt.Printf("Selesai insert, total IP diproses: %d\n", inserted)
 	return tx.Commit()
 }
 
