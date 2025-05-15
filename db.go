@@ -150,6 +150,7 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 				if len(batchIPs) >= batchSize {
 					if err := insertIPBatch(tx, batchIPs); err != nil {
 						fmt.Printf("Gagal insert batch: %v\n", err)
+						tx.Rollback()
 						return err
 					}
 					inserted += len(batchIPs)
@@ -163,16 +164,24 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	if len(batchIPs) > 0 {
 		if err := insertIPBatch(tx, batchIPs); err != nil {
 			fmt.Printf("Gagal insert batch: %v\n", err)
+			tx.Rollback()
 			return err
 		}
 		inserted += len(batchIPs)
 		fmt.Printf("Batch insert %d IP, total inserted: %d\n", len(batchIPs), inserted)
 	}
 	if err := scanner.Err(); err != nil {
+		fmt.Printf("Scanner error: %v\n", err)
+		tx.Rollback()
 		return err
 	}
 	fmt.Printf("Selesai insert, total IP diproses: %d\n", inserted)
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		fmt.Printf("Commit error: %v\n", err)
+		return err
+	}
+	fmt.Println("Commit sukses, data sudah masuk ke database.")
+	return nil
 }
 
 // Helper untuk increment IP
