@@ -262,9 +262,11 @@ func main() {
 		progressbar.OptionShowCount(),
 	)
 
-	workerDetectCount := *workersPtr
+	batchFetchSize := 20 // jumlah host yang diambil sekaligus per worker
+
 	ctxDetect, cancelDetect := context.WithCancel(context.Background())
 	defer cancelDetect()
+
 	detectWorker := func() {
 		defer wgDetect.Done()
 		for {
@@ -272,33 +274,34 @@ func main() {
 			case <-ctxDetect.Done():
 				return
 			default:
-				ip, err := fetchAndMarkNextPendingHost(db)
+				ips, err := fetchAndMarkNextPendingHosts(db, batchFetchSize)
 				if err != nil {
 					return // no more pending
 				}
-				// Untuk setiap host, scan semua vektor, catat jika ada yang sukses
-				success := false
-				for _, vector := range vectors {
-					task := ScanTask{
-						Host:    ip,
-						Name:    vector.Name,
-						Port:    vector.Port,
-						Payload: vector.Payload,
+				for _, ip := range ips {
+					success := false
+					for _, vector := range vectors {
+						task := ScanTask{
+							Host:    ip,
+							Name:    vector.Name,
+							Port:    vector.Port,
+							Payload: vector.Payload,
+						}
+						if scanAndMeasureHost(task, timeout, db) {
+							success = true
+						}
 					}
-					if scanAndMeasureHost(task, timeout, db) {
-						success = true
+					if success {
+						updateHostStatus(db, ip, "vulnerable")
+					} else {
+						updateHostStatus(db, ip, "not vulnerable")
 					}
+					barProgress.Add(1)
 				}
-				if success {
-					updateHostStatus(db, ip, "vulnerable")
-				} else {
-					updateHostStatus(db, ip, "not vulnerable")
-				}
-				barProgress.Add(1)
 			}
 		}
 	}
-	for i := 0; i < workerDetectCount; i++ {
+	for i := 0; i < *workersPtr; i++ {
 		wgDetect.Add(1)
 		go detectWorker()
 	}

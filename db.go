@@ -143,7 +143,7 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 		progressbar.OptionClearOnFinish(),
 	)
 
-	batchSize := 256
+	batchSize := 1024
 	batchIPs := make([]string, 0, batchSize)
 	inserted := 0
 
@@ -275,4 +275,49 @@ func fetchAndMarkNextPendingHost(db *sql.DB) (string, error) {
 		return "", err
 	}
 	return net.IP(ipBytes).String(), nil
+}
+
+func fetchAndMarkNextPendingHosts(db *sql.DB, batchSize int) ([]string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT id, ip FROM hosts WHERE status = 'pending' ORDER BY id ASC LIMIT ? FOR UPDATE`, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int
+	var ips []string
+	for rows.Next() {
+		var id int
+		var ipBytes []byte
+		if err := rows.Scan(&id, &ipBytes); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+		ips = append(ips, net.IP(ipBytes).String())
+	}
+	if len(ids) == 0 {
+		return nil, sql.ErrNoRows
+	}
+
+	// Update status untuk batch
+	query := "UPDATE hosts SET status = 'scanning' WHERE id IN (?" + strings.Repeat(",?", len(ids)-1) + ")"
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	_, err = tx.Exec(query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ips, nil
 }
