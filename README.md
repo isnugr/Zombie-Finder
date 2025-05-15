@@ -5,11 +5,10 @@ Zombie Scanner adalah alat untuk mendeteksi layanan UDP pada host yang rentan te
 ## Fitur Utama
 - Scan UDP amplification vector (DNS, NTP, cLDAP, dll)
 - Input host dari file (1 IP per baris, mendukung CIDR)
-- Penyimpanan hasil ke database MySQL/MariaDB
-- Status scan per host (pending, scanning, vulnerable, not vulnerable)
+- Penyimpanan hasil ke database MySQL/MariaDB (hanya tabel scan_results)
 - Paralelisme adaptif (otomatis menyesuaikan jumlah worker sesuai load CPU)
 - Bisa dihentikan dengan Ctrl+C (graceful shutdown)
-- Progress bar saat insert host
+- Progress bar saat proses scan
 
 ## Instalasi
 1. **Clone repo & install dependency**
@@ -51,23 +50,16 @@ Zombie Scanner adalah alat untuk mendeteksi layanan UDP pada host yang rentan te
 ## Output & Database
 - Hasil scan disimpan ke database MySQL/MariaDB sesuai parameter `--db`.
 - Tabel utama:
-  - `hosts`: daftar IP (VARBINARY(16)) dan status scan (`pending`, `scanning`, `vulnerable`, `not vulnerable`)
   - `scan_results`: hasil sukses (1 baris per kombinasi host-vektor yang open)
 
 ### Contoh Query Hasil
-- Semua hasil sukses untuk satu host (gunakan fungsi INET6_NTOA untuk konversi IP):
+- Semua hasil sukses untuk satu host:
   ```sql
   SELECT * FROM scan_results WHERE host = '1.2.3.4';
-  -- atau untuk hosts:
-  SELECT * FROM hosts WHERE INET6_NTOA(ip) = '1.2.3.4';
   ```
 - Semua host yang open pada vektor NTP:
   ```sql
   SELECT * FROM scan_results WHERE vector = 'NTP';
-  ```
-- Semua host yang statusnya vulnerable:
-  ```sql
-  SELECT INET6_NTOA(ip) as ip, status FROM hosts WHERE status = 'vulnerable';
   ```
 
 ## Catatan Penting
