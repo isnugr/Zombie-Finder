@@ -6,13 +6,14 @@
 package main
 
 import (
-	"context"
+	"bufio"
 	"database/sql"
 	"flag"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,6 +207,50 @@ func scanAndMeasureHost(task ScanTask, timeout time.Duration, db *sql.DB) bool {
 	return true
 }
 
+func readHostsFromFile(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	hosts := []string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		ip := strings.TrimSpace(scanner.Text())
+		if ip == "" || strings.HasPrefix(ip, "#") {
+			continue
+		}
+		if strings.Contains(ip, "/") {
+			ipAddr, ipnet, err := net.ParseCIDR(ip)
+			if err != nil {
+				continue
+			}
+			for ip := ipAddr.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
+				ipCopy := make(net.IP, len(ip))
+				copy(ipCopy, ip)
+				hosts = append(hosts, ipCopy.String())
+			}
+		} else {
+			hosts = append(hosts, ip)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return hosts, nil
+}
+
+// Helper untuk increment IP
+func incIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] != 0 {
+			break
+		}
+	}
+}
+
 func main() {
 	// Parse command line arguments
 	vectorsPtr := flag.String("vectors", "all", "OPTIONAL. Define vectors you want to search for, if left empty then all vectors will be included in the scan. [--vectors display] to list all vectors")
@@ -222,101 +267,70 @@ func main() {
 	}
 
 	timeout := time.Duration(*timeoutPtr) * time.Millisecond
-
 	db, err := initDB(*dbPtr)
-
 	if err != nil {
 		fmt.Printf("Failed to initialize database: %v\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	if *hostsFilePtr != "" {
-		// Inisialisasi semua tabel hanya jika ada hostsfile
-		if err := initAllTables(db); err != nil {
-			fmt.Printf("Failed to initialize tables: %v\n", err)
-			os.Exit(1)
-		}
-		if err := insertHostsFromFile(db, *hostsFilePtr); err != nil {
-			fmt.Printf("Failed to insert hosts from file: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		// Cleanup jika tidak ada hostsfile
-		if err := cleanupHostsAndResults(db); err != nil {
-			fmt.Printf("Failed to cleanup hosts and results: %v\n", err)
-			os.Exit(1)
-		}
+	// Inisialisasi tabel hasil scan
+	if err := initAllTables(db); err != nil {
+		fmt.Printf("Failed to initialize tables: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *hostsFilePtr == "" {
+		fmt.Println("hostsfile parameter is required!")
+		os.Exit(1)
+	}
+
+	hosts, err := readHostsFromFile(*hostsFilePtr)
+	if err != nil {
+		fmt.Printf("Failed to read hosts from file: %v\n", err)
+		os.Exit(1)
 	}
 
 	fmt.Println("Starting scan...")
-	// Detection + Measurement phase with worker pool
 	var wgDetect sync.WaitGroup
-	// Get total hosts for progress bar
-	var totalHosts int
-	row := db.QueryRow("SELECT COUNT(*) FROM hosts")
-	row.Scan(&totalHosts)
-
-	barProgress := progressbar.NewOptions(totalHosts,
+	barProgress := progressbar.NewOptions(len(hosts),
 		progressbar.OptionSetDescription("Progress"),
 		progressbar.OptionShowCount(),
 	)
 
-	batchFetchSize := 20 // jumlah host yang diambil sekaligus per worker
-
-	ctxDetect, cancelDetect := context.WithCancel(context.Background())
-	defer cancelDetect()
-
-	detectWorker := func() {
-		defer wgDetect.Done()
-		for {
-			select {
-			case <-ctxDetect.Done():
-				return
-			default:
-				ips, err := fetchAndMarkNextPendingHosts(db, batchFetchSize)
-				if err != nil {
-					return // no more pending
-				}
-				for _, ip := range ips {
-					success := false
-					for _, vector := range vectors {
-						task := ScanTask{
-							Host:    ip,
-							Name:    vector.Name,
-							Port:    vector.Port,
-							Payload: vector.Payload,
-						}
-						if scanAndMeasureHost(task, timeout, db) {
-							success = true
-						}
-					}
-					if success {
-						updateHostStatus(db, ip, "vulnerable")
-					} else {
-						updateHostStatus(db, ip, "not vulnerable")
-					}
-					barProgress.Add(1)
-				}
-			}
-		}
-	}
+	taskCh := make(chan string, 100)
 	for i := 0; i < *workersPtr; i++ {
 		wgDetect.Add(1)
-		go detectWorker()
+		go func() {
+			defer wgDetect.Done()
+			for ip := range taskCh {
+				for _, vector := range vectors {
+					task := ScanTask{
+						Host:    ip,
+						Name:    vector.Name,
+						Port:    vector.Port,
+						Payload: vector.Payload,
+					}
+					_ = scanAndMeasureHost(task, timeout, db)
+				}
+				barProgress.Add(1)
+			}
+		}()
 	}
+	for _, ip := range hosts {
+		taskCh <- ip
+	}
+	close(taskCh)
 	wgDetect.Wait()
 
 	// Print statistik dari database
 	fmt.Println("\nStatistik hasil scan:")
-	var nDetected, nResults, nHosts int
-	row = db.QueryRow("SELECT COUNT(DISTINCT host) FROM scan_results")
+	var nDetected, nResults int
+	row := db.QueryRow("SELECT COUNT(DISTINCT host) FROM scan_results")
 	row.Scan(&nDetected)
 	row = db.QueryRow("SELECT COUNT(*) FROM scan_results")
 	row.Scan(&nResults)
-	row = db.QueryRow("SELECT COUNT(*) FROM hosts")
-	row.Scan(&nHosts)
 	fmt.Printf("Host terdeteksi open: %d\n", nDetected)
 	fmt.Printf("Total hasil (host+vector open): %d\n", nResults)
-	fmt.Printf("Total host discan: %d\n", nHosts)
+	fmt.Printf("Total host discan: %d\n", len(hosts))
 }
