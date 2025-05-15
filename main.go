@@ -221,11 +221,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *hostsFilePtr == "" {
-		fmt.Println("No hosts file provided!")
-		os.Exit(1)
-	}
-
 	timeout := time.Duration(*timeoutPtr) * time.Millisecond
 
 	db, err := initDB(*dbPtr)
@@ -242,10 +237,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Masukkan IP dari file ke tabel hosts di database
-	if err := insertHostsFromFile(db, *hostsFilePtr); err != nil {
-		fmt.Printf("Failed to insert hosts from file: %v\n", err)
-		os.Exit(1)
+	if *hostsFilePtr != "" {
+		if err := insertHostsFromFile(db, *hostsFilePtr); err != nil {
+			fmt.Printf("Failed to insert hosts from file: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// Cleanup jika tidak ada hostsfile
+		if err := cleanupHostsAndResults(db); err != nil {
+			fmt.Printf("Failed to cleanup hosts and results: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Println("Starting scan...")

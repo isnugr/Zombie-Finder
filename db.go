@@ -3,10 +3,11 @@ package main
 import (
 	"bufio"
 	"database/sql"
-	"fmt"
 	"net"
 	"os"
 	"strings"
+
+	"github.com/schollz/progressbar/v3"
 )
 
 func initDB(dsn string) (*sql.DB, error) {
@@ -60,6 +61,41 @@ func initHostsTable(db *sql.DB) error {
 	return err
 }
 
+// Tambahkan fungsi cleanup untuk host status scanning dan scan_results terkait
+func cleanupHostsAndResults(db *sql.DB) error {
+	// Ambil semua IP dengan status scanning
+	rows, err := db.Query("SELECT ip FROM hosts WHERE status = 'scanning'")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var scanningIPs []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err != nil {
+			return err
+		}
+		scanningIPs = append(scanningIPs, ip)
+	}
+
+	// Update status host menjadi pending
+	if len(scanningIPs) > 0 {
+		_, err := db.Exec("UPDATE hosts SET status = 'pending' WHERE status = 'scanning'")
+		if err != nil {
+			return err
+		}
+		// Hapus scan_results untuk IP-IP tersebut
+		for _, ip := range scanningIPs {
+			_, err := db.Exec("DELETE FROM scan_results WHERE host = ?", ip)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func insertHostsFromFile(db *sql.DB, path string) error {
 	file, err := os.Open(path)
 	if err != nil {
@@ -67,15 +103,38 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	}
 	defer file.Close()
 
+	// Hitung total IP valid untuk progress bar
+	total := 0
+	scanCount, _ := os.Open(path)
+	defer scanCount.Close()
+	scannerCount := bufio.NewScanner(scanCount)
+	for scannerCount.Scan() {
+		ip := strings.TrimSpace(scannerCount.Text())
+		if ip == "" || strings.HasPrefix(ip, "#") {
+			continue
+		}
+		if strings.Contains(ip, "/") {
+			_, ipnet, err := net.ParseCIDR(ip)
+			if err == nil {
+				ones, bits := ipnet.Mask.Size()
+				count := 1 << (bits - ones)
+				total += count
+			}
+		}
+	}
+
+	bar := progressbar.NewOptions(total,
+		progressbar.OptionSetDescription("Insert Hosts"),
+		progressbar.OptionShowCount(),
+	)
+
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare("INSERT IGNORE INTO hosts (ip) VALUES (?)")
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
+
+	batchSize := 256
+	batchIPs := make([]string, 0, batchSize)
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -83,37 +142,63 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 		if ip == "" || strings.HasPrefix(ip, "#") {
 			continue
 		}
-		if strings.HasSuffix(ip, "/24") {
-			base := strings.TrimSuffix(ip, "/24")
-			parts := strings.Split(base, ".")
-			if len(parts) != 4 {
-				continue
-			}
-			baseIP := strings.Join(parts[:3], ".")
-			for i := 0; i < 256; i++ {
-				fullIP := fmt.Sprintf("%s.%d", baseIP, i)
-				if net.ParseIP(fullIP) == nil {
-					continue
-				}
-				_, err := stmt.Exec(fullIP)
-				if err != nil {
-					return err
-				}
-			}
-		} else {
-			if net.ParseIP(ip) == nil {
-				continue
-			}
-			_, err := stmt.Exec(ip)
+		if strings.Contains(ip, "/") {
+			ipAddr, ipnet, err := net.ParseCIDR(ip)
 			if err != nil {
-				return err
+				continue
 			}
+			for ip := ipAddr.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
+				ipCopy := make(net.IP, len(ip))
+				copy(ipCopy, ip)
+				batchIPs = append(batchIPs, ipCopy.String())
+				if len(batchIPs) >= batchSize {
+					if err := insertIPBatch(tx, batchIPs); err != nil {
+						return err
+					}
+					for range batchIPs {
+						bar.Add(1)
+					}
+					batchIPs = batchIPs[:0]
+				}
+			}
+		}
+	}
+	// Insert sisa batch
+	if len(batchIPs) > 0 {
+		if err := insertIPBatch(tx, batchIPs); err != nil {
+			return err
+		}
+		for range batchIPs {
+			bar.Add(1)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// Helper untuk increment IP
+func incIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] != 0 {
+			break
+		}
+	}
+}
+
+// Helper untuk batch insert
+func insertIPBatch(tx *sql.Tx, ips []string) error {
+	placeholders := make([]string, len(ips))
+	args := make([]interface{}, len(ips))
+	for i, ip := range ips {
+		placeholders[i] = "(?)"
+		args[i] = ip
+	}
+	query := "INSERT IGNORE INTO hosts (ip) VALUES " + strings.Join(placeholders, ",")
+	_, err := tx.Exec(query, args...)
+	return err
 }
 
 func updateHostStatus(db *sql.DB, ip, status string) error {
