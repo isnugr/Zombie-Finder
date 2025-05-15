@@ -64,8 +64,9 @@ func initHostsTable(db *sql.DB) error {
 	}
 	createTable := `CREATE TABLE hosts (
 		id INTEGER PRIMARY KEY AUTO_INCREMENT,
-		ip TEXT UNIQUE,
-		status TEXT DEFAULT 'pending'
+		ip VARBINARY(16) UNIQUE,
+		status ENUM('pending','scanning','vulnerable','not vulnerable') DEFAULT 'pending',
+		INDEX idx_status (status)
 	);`
 	_, err = db.Exec(createTable)
 	return err
@@ -237,7 +238,7 @@ func insertIPBatch(tx *sql.Tx, ips []string) error {
 	args := make([]interface{}, len(ips))
 	for i, ip := range ips {
 		placeholders[i] = "(?)"
-		args[i] = ip
+		args[i] = net.ParseIP(ip)
 	}
 	query := "INSERT IGNORE INTO hosts (ip) VALUES " + strings.Join(placeholders, ",")
 	_, err := tx.Exec(query, args...)
@@ -245,7 +246,7 @@ func insertIPBatch(tx *sql.Tx, ips []string) error {
 }
 
 func updateHostStatus(db *sql.DB, ip, status string) error {
-	_, err := db.Exec(`UPDATE hosts SET status = ? WHERE ip = ?`, status, ip)
+	_, err := db.Exec(`UPDATE hosts SET status = ? WHERE ip = ?`, status, net.ParseIP(ip))
 	return err
 }
 
@@ -257,13 +258,15 @@ func fetchAndMarkNextPendingHost(db *sql.DB) (string, error) {
 	}
 	defer tx.Rollback()
 
-	var ip string
-	err = tx.QueryRow(`SELECT ip FROM hosts WHERE status = 'pending' LIMIT 1 FOR UPDATE`).Scan(&ip)
+	var ipBytes []byte
+	var id int
+	// Ambil id terkecil yang status pending
+	err = tx.QueryRow(`SELECT id, ip FROM hosts WHERE status = 'pending' ORDER BY id ASC LIMIT 1 FOR UPDATE`).Scan(&id, &ipBytes)
 	if err != nil {
 		return "", err // no rows = selesai
 	}
 
-	_, err = tx.Exec(`UPDATE hosts SET status = 'scanning' WHERE ip = ?`, ip)
+	_, err = tx.Exec(`UPDATE hosts SET status = 'scanning' WHERE id = ?`, id)
 	if err != nil {
 		return "", err
 	}
@@ -271,5 +274,5 @@ func fetchAndMarkNextPendingHost(db *sql.DB) (string, error) {
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
-	return ip, nil
+	return net.IP(ipBytes).String(), nil
 }

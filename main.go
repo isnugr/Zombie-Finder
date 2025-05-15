@@ -290,9 +290,9 @@ func main() {
 					}
 				}
 				if success {
-					updateHostStatus(db, ip, "Vulnerable")
+					updateHostStatus(db, ip, "vulnerable")
 				} else {
-					updateHostStatus(db, ip, "Not Vulnerable")
+					updateHostStatus(db, ip, "not vulnerable")
 				}
 				barProgress.Add(1)
 			}
