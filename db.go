@@ -127,6 +127,9 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	batchIPs := make([]string, 0, batchSize)
 	inserted := 0
 
+	progress := 0
+	lastPercent := -1
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		ip := strings.TrimSpace(scanner.Text())
@@ -145,21 +148,23 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 				if len(batchIPs) >= batchSize {
 					tx, err := db.Begin()
 					if err != nil {
-						fmt.Printf("Gagal mulai transaksi: %v\n", err)
 						return err
 					}
 					if err := insertIPBatch(tx, batchIPs); err != nil {
-						fmt.Printf("Gagal insert batch: %v\n", err)
 						tx.Rollback()
 						return err
 					}
 					if err := tx.Commit(); err != nil {
-						fmt.Printf("Commit error: %v\n", err)
 						return err
 					}
 					inserted += len(batchIPs)
-					fmt.Printf("Batch insert %d IP, total inserted: %d\n", len(batchIPs), inserted)
 					batchIPs = batchIPs[:0]
+					// Progress bar update
+					progress = int(float64(inserted) / float64(total) * 100)
+					if progress != lastPercent {
+						fmt.Printf("\rProgress: %d%%", progress)
+						lastPercent = progress
+					}
 				}
 			}
 		} else {
@@ -167,21 +172,23 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 			if len(batchIPs) >= batchSize {
 				tx, err := db.Begin()
 				if err != nil {
-					fmt.Printf("Gagal mulai transaksi: %v\n", err)
 					return err
 				}
 				if err := insertIPBatch(tx, batchIPs); err != nil {
-					fmt.Printf("Gagal insert batch: %v\n", err)
 					tx.Rollback()
 					return err
 				}
 				if err := tx.Commit(); err != nil {
-					fmt.Printf("Commit error: %v\n", err)
 					return err
 				}
 				inserted += len(batchIPs)
-				fmt.Printf("Batch insert %d IP, total inserted: %d\n", len(batchIPs), inserted)
 				batchIPs = batchIPs[:0]
+				// Progress bar update
+				progress = int(float64(inserted) / float64(total) * 100)
+				if progress != lastPercent {
+					fmt.Printf("\rProgress: %d%%", progress)
+					lastPercent = progress
+				}
 			}
 		}
 	}
@@ -189,26 +196,27 @@ func insertHostsFromFile(db *sql.DB, path string) error {
 	if len(batchIPs) > 0 {
 		tx, err := db.Begin()
 		if err != nil {
-			fmt.Printf("Gagal mulai transaksi: %v\n", err)
 			return err
 		}
 		if err := insertIPBatch(tx, batchIPs); err != nil {
-			fmt.Printf("Gagal insert batch: %v\n", err)
 			tx.Rollback()
 			return err
 		}
 		if err := tx.Commit(); err != nil {
-			fmt.Printf("Commit error: %v\n", err)
 			return err
 		}
 		inserted += len(batchIPs)
-		fmt.Printf("Batch insert %d IP, total inserted: %d\n", len(batchIPs), inserted)
+		// Progress bar update
+		progress = int(float64(inserted) / float64(total) * 100)
+		if progress != lastPercent {
+			fmt.Printf("\rProgress: %d%%", progress)
+			lastPercent = progress
+		}
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Printf("Scanner error: %v\n", err)
 		return err
 	}
-	fmt.Printf("Selesai insert, total IP diproses: %d\n", inserted)
+	fmt.Printf("\rProgress: 100%%\n")
 	return nil
 }
 
