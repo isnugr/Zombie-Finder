@@ -4,9 +4,10 @@ go 1.22
 
 toolchain go1.24.3
 
-require github.com/mattn/go-sqlite3 v1.14.28
+require github.com/go-sql-driver/mysql v1.9.2
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
